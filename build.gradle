@@ -1,0 +1,54 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.loottableviewer'
+version = '1.0.0'
+
+def runeLiteVersion = 'latest.release'
+def pluginMainClass = 'com.loottableviewer.LootTableViewerLauncher'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
+
+repositories {
+    mavenLocal()
+    maven {
+        url = 'https://repo.runelite.net'
+        content {
+            includeGroupByRegex('net\\.runelite.*')
+        }
+    }
+    mavenCentral()
+}
+
+configurations.configureEach {
+    resolutionStrategy.cacheChangingModulesFor 0, 'seconds'
+}
+
+dependencies {
+    compileOnly group: 'net.runelite', name: 'client', version: runeLiteVersion, changing: true
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation group: 'net.runelite', name: 'client', version: runeLiteVersion, changing: true
+    testImplementation group: 'net.runelite', name: 'jshell', version: runeLiteVersion, changing: true
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 11
+}
+
+tasks.register('run', JavaExec) {
+    group = 'runelite'
+    description = 'Run RuneLite with the external plugin loaded'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = pluginMainClass
+    jvmArgs = ['-ea']
+}
+
+tasks.named('test') {
+    failOnNoDiscoveredTests = false
+}
