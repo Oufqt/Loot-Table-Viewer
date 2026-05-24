@@ -33,7 +33,7 @@ import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 
 @PluginDescriptor(
-    name = "Loot-Table-Viewer",
+    name = "Loot Table Viewer",
     description = "Displays recent loot and wiki drop rates beside received items",
     tags = {"loot", "drops", "wiki", "raids", "chest"}
 )
@@ -76,7 +76,7 @@ public class LootTableViewerPlugin extends Plugin
 
         BufferedImage icon = buildNavigationIcon();
         navigationButton = NavigationButton.builder()
-            .tooltip("Loot-Table-Viewer")
+            .tooltip("Loot Table Viewer")
             .icon(icon)
             .priority(7)
             .panel(panel)

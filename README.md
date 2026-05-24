@@ -1,6 +1,6 @@
-# Loot-Table-Viewer
+# Loot Table Viewer
 
-Loot-Table-Viewer is a RuneLite external plugin that combines received loot history with OSRS Wiki-style potential drop tables.
+Loot Table Viewer is a RuneLite external plugin that combines received loot history with OSRS Wiki-style potential drop tables.
 
 ## Features
 

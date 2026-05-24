@@ -20,7 +20,7 @@ public class OsrsWikiClient
     private static final String API_BASE = "https://oldschool.runescape.wiki/api.php";
     private static final String PAGE_BASE = "https://oldschool.runescape.wiki/w/";
     private static final String WIKI_HOST = "oldschool.runescape.wiki";
-    private static final String DEFAULT_USER_AGENT = "RuneLite Loot-Table-Viewer";
+    private static final String DEFAULT_USER_AGENT = "RuneLite Loot Table Viewer";
     private static final int MAX_RESPONSE_BYTES = 2_000_000;
     private static final int MAX_USER_AGENT_LENGTH = 128;
 

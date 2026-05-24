@@ -44,6 +44,6 @@ public interface LootTableViewerConfig extends Config
     )
     default String wikiUserAgent()
     {
-        return "RuneLite Loot-Table-Viewer";
+        return "RuneLite Loot Table Viewer";
     }
 }
