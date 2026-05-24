@@ -58,7 +58,7 @@ public class LootTableViewerPanel extends PluginPanel
     private static final int TITLE_PADDING = 5;
     private static final String EXPANDED_ARROW = "\u25BE";
     private static final String COLLAPSED_ARROW = "\u25B8";
-    private static final String PLUGIN_NAME = "Loot Table Viewer";
+    private static final String PLUGIN_NAME = "Loot-Table-Viewer";
     private static final Icon NOTHING_ICON = new NothingIcon();
 
     private final ItemManager itemManager;
