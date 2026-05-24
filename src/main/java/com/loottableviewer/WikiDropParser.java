@@ -12,7 +12,7 @@ import javax.inject.Singleton;
 @Singleton
 public class WikiDropParser
 {
-    private static final Pattern DROPS_TABLE_HEAD_PATTERN = Pattern.compile("\\{\\{\\s*DropsTableHead\\s*\\|", Pattern.CASE_INSENSITIVE);
+    private static final Pattern DROPS_TABLE_HEAD_PATTERN = Pattern.compile("\\{\\{\\s*DropsTableHead\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern DROP_LINE_CLUE_PATTERN = Pattern.compile("\\{\\{\\s*DropsLineClue\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern DROP_LINE_PATTERN = Pattern.compile("\\{\\{\\s*(?:DropsLine|DropLine)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern NAME_PATTERN = Pattern.compile("\\|\\s*(?:name|item|drop|reward)\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
@@ -58,12 +58,12 @@ public class WikiDropParser
     private void parseTemplateStyleDrops(String wikitext, List<DropEntry> entries)
     {
         String currentCategory = "Other";
-        String currentHeadingCategory = "";
+        String activeHeadingCategory = "";
         int index = 0;
 
         while (index < wikitext.length() && entries.size() < config.maxDropRows())
         {
-            int headStart = indexOfIgnoreCase(wikitext, "{{DropsTableHead|", index);
+            int headStart = findNextDropsTableHeadStart(wikitext, index);
             int lineStart = findNextDropLineStart(wikitext, index);
 
             if (headStart < 0 && lineStart < 0)
@@ -75,28 +75,26 @@ public class WikiDropParser
             String headingCategory = lastWikiHeading(wikitext, index, nextStart);
             if (!headingCategory.isBlank())
             {
-                currentHeadingCategory = headingCategory;
+                activeHeadingCategory = headingCategory;
             }
 
             if (headStart >= 0 && (lineStart < 0 || headStart < lineStart))
             {
-                int headEnd = wikitext.indexOf("}}", headStart);
+                int headEnd = findTemplateEnd(wikitext, headStart);
                 if (headEnd < 0)
                 {
                     break;
                 }
 
-                String category = extractDropsTableCategory(wikitext.substring(headStart + "{{DropsTableHead|".length(), headEnd));
-                if (!currentHeadingCategory.isBlank())
-                {
-                    currentCategory = currentHeadingCategory;
-                }
-                else if (!category.isEmpty())
-                {
-                    currentCategory = category;
-                }
-                index = headEnd + 2;
+                String category = extractDropsTableCategory(wikitext.substring(headStart, headEnd));
+                currentCategory = resolveCategory(activeHeadingCategory, category);
+                index = headEnd;
                 continue;
+            }
+
+            if (!headingCategory.isBlank())
+            {
+                currentCategory = resolveCategory(activeHeadingCategory, "");
             }
 
             int lineEnd = findTemplateEnd(wikitext, lineStart);
@@ -348,6 +346,8 @@ public class WikiDropParser
             return "Other";
         }
 
+        value = dropsTableHeadBody(value);
+
         String positionalCategory = "";
         String namedCategory = "";
         String dropVersion = "";
@@ -394,6 +394,62 @@ public class WikiDropParser
         }
 
         return positionalCategory.isBlank() ? "Other" : positionalCategory;
+    }
+
+    private static String resolveCategory(String headingCategory, String tableCategory)
+    {
+        String heading = clean(headingCategory);
+        String table = clean(tableCategory);
+
+        if (!heading.isBlank() && !isGenericCategory(heading))
+        {
+            return heading;
+        }
+
+        if (!table.isBlank() && !isGenericCategory(table))
+        {
+            return table;
+        }
+
+        if (!heading.isBlank())
+        {
+            return heading;
+        }
+
+        return table.isBlank() ? "Other" : table;
+    }
+
+    private static boolean isGenericCategory(String category)
+    {
+        String lower = category == null ? "" : category.toLowerCase(Locale.ENGLISH).trim();
+        return lower.equals("drops")
+            || lower.equals("drop table")
+            || lower.equals("loot")
+            || lower.equals("loot table")
+            || lower.equals("rewards")
+            || lower.equals("reward");
+    }
+
+    private static String dropsTableHeadBody(String value)
+    {
+        String body = value.trim();
+        Matcher matcher = DROPS_TABLE_HEAD_PATTERN.matcher(body);
+        if (matcher.find() && matcher.start() == 0)
+        {
+            body = body.substring(matcher.end()).trim();
+        }
+
+        while (body.endsWith("}}"))
+        {
+            body = body.substring(0, body.length() - 2).trim();
+        }
+
+        if (body.startsWith("|"))
+        {
+            body = body.substring(1).trim();
+        }
+
+        return body;
     }
 
     private static String formatDropVersion(String dropVersion)
@@ -478,6 +534,12 @@ public class WikiDropParser
             return dropsLine;
         }
         return Math.min(dropsLine, dropLine);
+    }
+
+    private static int findNextDropsTableHeadStart(String text, int fromIndex)
+    {
+        Matcher matcher = DROPS_TABLE_HEAD_PATTERN.matcher(text);
+        return matcher.find(Math.max(0, fromIndex)) ? matcher.start() : -1;
     }
 
     private static int indexOfIgnoreCase(String text, String needle, int fromIndex)

@@ -674,8 +674,7 @@ public class LootTableViewerPanel extends PluginPanel
     private boolean isGenericCategory(String categoryName)
     {
         String lower = categoryName.toLowerCase().trim();
-        return lower.equals("other")
-            || lower.equals("drops")
+        return lower.equals("drops")
             || lower.equals("drop table")
             || lower.equals("loot")
             || lower.equals("loot table");

@@ -85,4 +85,79 @@ public class WikiDropParserTest
         assertEquals("100%", drops.get(0).getCategory());
         assertEquals("Runes and ammunition", drops.get(1).getCategory());
     }
+
+    @Test
+    public void parseUsesWikiHeadingsForBareDropsTableHeads()
+    {
+        WikiDropParser parser = new WikiDropParser(new LootTableViewerConfig()
+        {
+        });
+
+        List<DropEntry> drops = parser.parse(
+            "==Drops==\n"
+                + "===Weapons and armour===\n"
+                + "{{DropsTableHead}}\n"
+                + "{{DropsLine|name=Dragon med helm|quantity=1|rarity=5/104}}\n"
+                + "{{DropsTableBottom}}\n"
+                + "===Runes and ammunition===\n"
+                + "{{DropsTableHead}}\n"
+                + "{{DropsLine|name=Death rune|quantity=50-70|rarity=5/104}}\n"
+                + "{{DropsTableBottom}}\n"
+                + "===Other===\n"
+                + "{{DropsTableHead}}\n"
+                + "{{DropsLine|name=Clue scroll (elite)|quantity=1|rarity=1/75}}\n"
+                + "{{DropsTableBottom}}"
+        );
+
+        assertEquals(3, drops.size());
+        assertEquals("Weapons and armour", drops.get(0).getCategory());
+        assertEquals("Runes and ammunition", drops.get(1).getCategory());
+        assertEquals("Other", drops.get(2).getCategory());
+    }
+
+    @Test
+    public void parseUsesTableHeadCategoriesWhenDropSectionHeadingIsGeneric()
+    {
+        WikiDropParser parser = new WikiDropParser(new LootTableViewerConfig()
+        {
+        });
+
+        List<DropEntry> drops = parser.parse(
+            "==Drops==\n"
+                + "{{DropsTableHead|Weapons and armour}}\n"
+                + "{{DropsLine|name=Rune scimitar|quantity=1|rarity=1/128}}\n"
+                + "{{DropsTableBottom}}\n"
+                + "{{DropsTableHead|Runes and ammunition}}\n"
+                + "{{DropsLine|name=Chaos rune|quantity=15|rarity=1/32}}\n"
+                + "{{DropsTableBottom}}"
+        );
+
+        assertEquals(2, drops.size());
+        assertEquals("Weapons and armour", drops.get(0).getCategory());
+        assertEquals("Runes and ammunition", drops.get(1).getCategory());
+    }
+
+    @Test
+    public void parseUsesRewardHeadingsForChestsAndCaskets()
+    {
+        WikiDropParser parser = new WikiDropParser(new LootTableViewerConfig()
+        {
+        });
+
+        List<DropEntry> drops = parser.parse(
+            "==Rewards==\n"
+                + "====Ahrim's====\n"
+                + "{{DropsTableHead}}\n"
+                + "{{DropsLineReward|name=Ahrim's hood|quantity=1|rarity=1/2448}}\n"
+                + "{{DropsTableBottom}}\n"
+                + "===Master clue uniques===\n"
+                + "{{DropsTableHead|leagueRegion=General}}\n"
+                + "{{DropsLineReward|name=Occult ornament kit|quantity=1|rarity=1/851}}\n"
+                + "{{DropsTableBottom}}"
+        );
+
+        assertEquals(2, drops.size());
+        assertEquals("Ahrim's", drops.get(0).getCategory());
+        assertEquals("Master clue uniques", drops.get(1).getCategory());
+    }
 }
