@@ -7,12 +7,16 @@ import com.google.gson.JsonParser;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import okhttp3.HttpUrl;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 @Singleton
 public class OsrsWikiClient
@@ -25,11 +29,18 @@ public class OsrsWikiClient
     private static final int MAX_USER_AGENT_LENGTH = 128;
 
     private final LootTableViewerConfig config;
+    private final OkHttpClient wikiHttpClient;
 
     @Inject
-    public OsrsWikiClient(LootTableViewerConfig config)
+    public OsrsWikiClient(LootTableViewerConfig config, OkHttpClient okHttpClient)
     {
         this.config = config;
+        this.wikiHttpClient = okHttpClient.newBuilder()
+            .connectTimeout(5000, TimeUnit.MILLISECONDS)
+            .readTimeout(5000, TimeUnit.MILLISECONDS)
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build();
     }
 
     public WikiPageData findPage(String sourceName) throws IOException
@@ -123,29 +134,32 @@ public class OsrsWikiClient
 
     private JsonObject getJson(String url) throws IOException
     {
-        URL requestUrl = new URL(url);
-        if (!"https".equalsIgnoreCase(requestUrl.getProtocol()) || !WIKI_HOST.equalsIgnoreCase(requestUrl.getHost()))
+        HttpUrl requestUrl = HttpUrl.parse(url);
+        if (requestUrl == null || !"https".equalsIgnoreCase(requestUrl.scheme()) || !WIKI_HOST.equalsIgnoreCase(requestUrl.host()))
         {
             throw new IOException("Blocked non-OSRS Wiki request.");
         }
 
-        HttpURLConnection connection = (HttpURLConnection) requestUrl.openConnection();
-        connection.setInstanceFollowRedirects(false);
-        connection.setConnectTimeout(5000);
-        connection.setReadTimeout(5000);
-        connection.setRequestMethod("GET");
-        connection.setRequestProperty("Accept", "application/json");
-        connection.setRequestProperty("User-Agent", safeUserAgent());
+        Request request = new Request.Builder()
+            .url(requestUrl)
+            .header("Accept", "application/json")
+            .header("User-Agent", safeUserAgent())
+            .build();
 
-        int status = connection.getResponseCode();
-        if (status < 200 || status >= 300)
+        try (Response response = wikiHttpClient.newCall(request).execute())
         {
-            throw new IOException("OSRS Wiki returned HTTP " + status);
-        }
+            if (!response.isSuccessful())
+            {
+                throw new IOException("OSRS Wiki returned HTTP " + response.code());
+            }
 
-        try (InputStream inputStream = connection.getInputStream())
-        {
-            String body = readAll(inputStream);
+            ResponseBody responseBody = response.body();
+            if (responseBody == null)
+            {
+                throw new IOException("OSRS Wiki returned an empty response.");
+            }
+
+            String body = readAll(responseBody.byteStream());
             return new JsonParser().parse(body).getAsJsonObject();
         }
     }
