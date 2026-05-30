@@ -11,6 +11,7 @@ import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -20,9 +21,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.function.Consumer;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
+import net.runelite.api.Actor;
+import net.runelite.api.Client;
 import net.runelite.api.ItemComposition;
+import net.runelite.api.NPC;
+import net.runelite.api.Player;
+import net.runelite.api.events.InteractingChanged;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.game.ItemManager;
@@ -45,6 +52,9 @@ public class LootTableViewerPlugin extends Plugin
     private ClientToolbar clientToolbar;
 
     @Inject
+    private Client client;
+
+    @Inject
     private ItemManager itemManager;
 
     @Inject
@@ -60,6 +70,9 @@ public class LootTableViewerPlugin extends Plugin
     private LootTableViewerConfig config;
 
     private final Map<String, LootLookupResult> cache = new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<LootLookupResult>> inFlightLookups = new ConcurrentHashMap<>();
+    private final Map<String, DropRateLookup> dropRateCache = new ConcurrentHashMap<>();
+    private final Map<Integer, ItemInfo> itemInfoCache = new ConcurrentHashMap<>();
     private volatile ExecutorService executor;
     private NavigationButton navigationButton;
 
@@ -128,6 +141,9 @@ public class LootTableViewerPlugin extends Plugin
         }
 
         cache.clear();
+        inFlightLookups.clear();
+        dropRateCache.clear();
+        itemInfoCache.clear();
         ExecutorService currentExecutor = executor;
         executor = null;
         if (currentExecutor != null)
@@ -136,6 +152,30 @@ public class LootTableViewerPlugin extends Plugin
         }
 
         SwingUtilities.invokeLater(panel::clearHistory);
+    }
+
+    @Subscribe
+    public void onInteractingChanged(InteractingChanged event)
+    {
+        if (event == null)
+        {
+            return;
+        }
+
+        Player localPlayer = client.getLocalPlayer();
+        Actor target = event.getTarget();
+        if (localPlayer == null || event.getSource() != localPlayer || !(target instanceof NPC))
+        {
+            return;
+        }
+
+        String sourceName = target.getName();
+        if (sourceName == null || sourceName.isBlank())
+        {
+            return;
+        }
+
+        prefetchLookup(sourceName);
     }
 
     @Subscribe
@@ -161,7 +201,12 @@ public class LootTableViewerPlugin extends Plugin
         final String normalizedSourceName = sourceNameNormalizer.normalize(sourceName);
         final String sourceType = determineSourceType(sourceName);
         final String cacheKey = cacheKey(normalizedSourceName, sourceType);
-        final List<LootTableViewerPanel.ReceivedLootRow> initialRows = buildReceivedRows(receivedItems, null);
+
+        LootLookupResult cached = cache.get(cacheKey);
+        DropRateLookup initialDropRateLookup = cached == null
+            ? DropRateLookup.EMPTY
+            : dropRateCache.computeIfAbsent(cacheKey, key -> DropRateLookup.from(cached.getDrops()));
+        final List<LootTableViewerPanel.ReceivedLootRow> initialRows = buildReceivedRows(receivedItems, initialDropRateLookup);
         if (initialRows.isEmpty())
         {
             return;
@@ -173,19 +218,17 @@ public class LootTableViewerPlugin extends Plugin
                 cacheKey,
                 sourceName,
                 receivedAtText,
-                "",
-                "",
+                cached == null ? "" : cached.getWikiPageTitle(),
+                cached == null ? "" : cached.getWikiUrl(),
                 initialRows,
-                Collections.emptyList(),
-                "Looking up OSRS Wiki drop data...",
+                cached == null ? Collections.emptyList() : cached.getDrops(),
+                cached == null ? "" : cached.getStatusMessage(),
                 showReceivedItems
             ))
         );
 
-        LootLookupResult cached = cache.get(cacheKey);
         if (cached != null)
         {
-            updateHistoryFromResult(cacheKey, receivedItems, cached);
             return;
         }
 
@@ -196,21 +239,20 @@ public class LootTableViewerPlugin extends Plugin
             return;
         }
 
-        CompletableFuture
-                .supplyAsync(() ->
-                {
-                    return lookupService.lookup(
-                            sourceName,
-                            normalizedSourceName,
-                            sourceType,
-                            receivedItems,
-                            stageMessage -> updateHistoryStatusIfCurrent(currentExecutor, cacheKey, stageMessage)
-                    );
-                }, currentExecutor)
+        CompletableFuture<LootLookupResult> lookupFuture = lookupOrStart(
+            cacheKey,
+            sourceName,
+            normalizedSourceName,
+            sourceType,
+            receivedItems,
+            currentExecutor,
+            null
+        );
+
+        lookupFuture
                 .thenAccept(result ->
                 {
-                    cache.put(cacheKey, result);
-                    if (isExecutorCurrent(currentExecutor))
+                    if (result != null && isExecutorCurrent(currentExecutor))
                     {
                         updateHistoryFromResult(cacheKey, receivedItems, result);
                     }
@@ -225,9 +267,67 @@ public class LootTableViewerPlugin extends Plugin
                 });
     }
 
+    private void prefetchLookup(String sourceName)
+    {
+        String normalizedSourceName = sourceNameNormalizer.normalize(sourceName);
+        String sourceType = determineSourceType(sourceName);
+        String cacheKey = cacheKey(normalizedSourceName, sourceType);
+        if (cache.containsKey(cacheKey) || inFlightLookups.containsKey(cacheKey))
+        {
+            return;
+        }
+
+        ExecutorService currentExecutor = executor;
+        if (currentExecutor == null || currentExecutor.isShutdown())
+        {
+            return;
+        }
+
+        lookupOrStart(
+            cacheKey,
+            sourceName,
+            normalizedSourceName,
+            sourceType,
+            Collections.emptyList(),
+            currentExecutor,
+            null
+        );
+    }
+
+    private CompletableFuture<LootLookupResult> lookupOrStart(
+        String cacheKey,
+        String sourceName,
+        String normalizedSourceName,
+        String sourceType,
+        List<ReceivedItem> receivedItems,
+        ExecutorService currentExecutor,
+        Consumer<String> statusCallback)
+    {
+        return inFlightLookups.computeIfAbsent(cacheKey, key ->
+            CompletableFuture
+                .supplyAsync(() -> lookupService.lookup(
+                    sourceName,
+                    normalizedSourceName,
+                    sourceType,
+                    receivedItems,
+                    statusCallback
+                ), currentExecutor)
+                .whenComplete((result, ex) ->
+                {
+                    inFlightLookups.remove(key);
+                    if (ex == null && result != null)
+                    {
+                        cache.put(key, result);
+                        dropRateCache.put(key, DropRateLookup.from(result.getDrops()));
+                    }
+                })
+        );
+    }
+
     private void updateHistoryFromResult(String sourceKey, List<ReceivedItem> receivedItems, LootLookupResult result)
     {
-        List<LootTableViewerPanel.ReceivedLootRow> receivedRows = buildReceivedDropRateRows(receivedItems, result.getDrops());
+        DropRateLookup dropRateLookup = dropRateCache.computeIfAbsent(sourceKey, key -> DropRateLookup.from(result.getDrops()));
+        List<LootTableViewerPanel.ReceivedLootRow> receivedRows = buildReceivedDropRateRows(receivedItems, dropRateLookup);
         SwingUtilities.invokeLater(() ->
             panel.updateSourceEntry(
                 sourceKey,
@@ -278,16 +378,17 @@ public class LootTableViewerPlugin extends Plugin
         return cause.getMessage() == null ? cause.getClass().getSimpleName() : cause.getMessage();
     }
 
-    private List<LootTableViewerPanel.ReceivedLootRow> buildReceivedRows(List<ReceivedItem> receivedItems, List<DropEntry> drops)
+    private List<LootTableViewerPanel.ReceivedLootRow> buildReceivedRows(List<ReceivedItem> receivedItems, DropRateLookup dropRateLookup)
     {
         List<LootTableViewerPanel.ReceivedLootRow> rows = new ArrayList<>();
 
         for (ReceivedItem item : receivedItems)
         {
-            long unitPrice = itemManager.getItemPrice(item.getItemId());
+            ItemInfo itemInfo = itemInfo(item.getItemId());
+            long unitPrice = itemInfo.getGePrice();
             long totalPrice = unitPrice * Math.max(item.getQuantity(), 1);
-            long highAlchTotal = highAlchPrice(item.getItemId()) * Math.max(item.getQuantity(), 1);
-            String dropRate = findDropRateForItem(item.getItemId(), item.getItemName(), drops);
+            long highAlchTotal = itemInfo.getHighAlchPrice() * Math.max(item.getQuantity(), 1);
+            String dropRate = dropRateLookup.find(item.getItemId(), item.getItemName());
 
             rows.add(new LootTableViewerPanel.ReceivedLootRow(
                 item.getItemId(),
@@ -304,13 +405,13 @@ public class LootTableViewerPlugin extends Plugin
         return rows;
     }
 
-    private List<LootTableViewerPanel.ReceivedLootRow> buildReceivedDropRateRows(List<ReceivedItem> receivedItems, List<DropEntry> drops)
+    private List<LootTableViewerPanel.ReceivedLootRow> buildReceivedDropRateRows(List<ReceivedItem> receivedItems, DropRateLookup dropRateLookup)
     {
         List<LootTableViewerPanel.ReceivedLootRow> rows = new ArrayList<>();
 
         for (ReceivedItem item : receivedItems)
         {
-            String dropRate = findDropRateForItem(item.getItemId(), item.getItemName(), drops);
+            String dropRate = dropRateLookup.find(item.getItemId(), item.getItemName());
             rows.add(new LootTableViewerPanel.ReceivedLootRow(
                 item.getItemId(),
                 item.getItemName(),
@@ -323,40 +424,24 @@ public class LootTableViewerPlugin extends Plugin
         return rows;
     }
 
-    private long highAlchPrice(int itemId)
+    private ItemInfo itemInfo(int itemId)
     {
-        ItemComposition itemComposition = itemManager.getItemComposition(itemId);
-        return itemComposition == null ? 0 : itemComposition.getHaPrice();
+        if (itemId <= 0)
+        {
+            return new ItemInfo("Item " + itemId, 0, 0);
+        }
+
+        return itemInfoCache.computeIfAbsent(itemId, id ->
+        {
+            ItemComposition itemComposition = itemManager.getItemComposition(id);
+            String itemName = itemComposition == null ? ("Item " + id) : itemComposition.getName();
+            long gePrice = itemManager.getItemPrice(id);
+            long highAlchPrice = itemComposition == null ? 0 : itemComposition.getHaPrice();
+            return new ItemInfo(itemName, gePrice, highAlchPrice);
+        });
     }
 
-    private String findDropRateForItem(int itemId, String itemName, List<DropEntry> drops)
-    {
-        if (drops == null || drops.isEmpty())
-        {
-            return "";
-        }
-
-        for (DropEntry drop : drops)
-        {
-            if (drop.getItemId() > 0 && itemId > 0 && drop.getItemId() == itemId)
-            {
-                return safeDropRate(drop);
-            }
-        }
-
-        String normalizedItemName = normalizeItemName(itemName);
-        for (DropEntry drop : drops)
-        {
-            if (normalizeItemName(drop.getItemName()).equals(normalizedItemName))
-            {
-                return safeDropRate(drop);
-            }
-        }
-
-        return "";
-    }
-
-    private String safeDropRate(DropEntry drop)
+    private static String safeDropRate(DropEntry drop)
     {
         if (drop == null)
         {
@@ -376,7 +461,7 @@ public class LootTableViewerPlugin extends Plugin
         return "";
     }
 
-    private String normalizeItemName(String value)
+    private static String normalizeItemName(String value)
     {
         if (value == null)
         {
@@ -403,9 +488,7 @@ public class LootTableViewerPlugin extends Plugin
         event.getItems().forEach(stack ->
         {
             int itemId = stack.getId();
-            ItemComposition itemComposition = itemManager.getItemComposition(itemId);
-            String name = itemComposition == null ? ("Item " + itemId) : itemComposition.getName();
-            items.add(new ReceivedItem(itemId, name, stack.getQuantity()));
+            items.add(new ReceivedItem(itemId, itemInfo(itemId).getName(), stack.getQuantity()));
         });
         return items;
     }
@@ -442,5 +525,95 @@ public class LootTableViewerPlugin extends Plugin
         }
 
         return price + " gp";
+    }
+
+    private static final class DropRateLookup
+    {
+        private static final DropRateLookup EMPTY = new DropRateLookup(Collections.emptyMap(), Collections.emptyMap());
+
+        private final Map<Integer, String> byItemId;
+        private final Map<String, String> byName;
+
+        private DropRateLookup(Map<Integer, String> byItemId, Map<String, String> byName)
+        {
+            this.byItemId = byItemId;
+            this.byName = byName;
+        }
+
+        private static DropRateLookup from(List<DropEntry> drops)
+        {
+            if (drops == null || drops.isEmpty())
+            {
+                return EMPTY;
+            }
+
+            Map<Integer, String> byItemId = new HashMap<>();
+            Map<String, String> byName = new HashMap<>();
+
+            for (DropEntry drop : drops)
+            {
+                String rate = safeDropRate(drop);
+                if (rate.isBlank())
+                {
+                    continue;
+                }
+
+                if (drop.getItemId() > 0)
+                {
+                    byItemId.putIfAbsent(drop.getItemId(), rate);
+                }
+
+                String normalizedName = normalizeItemName(drop.getItemName());
+                if (!normalizedName.isBlank())
+                {
+                    byName.putIfAbsent(normalizedName, rate);
+                }
+            }
+
+            return new DropRateLookup(Collections.unmodifiableMap(byItemId), Collections.unmodifiableMap(byName));
+        }
+
+        private String find(int itemId, String itemName)
+        {
+            if (itemId > 0)
+            {
+                String rate = byItemId.get(itemId);
+                if (rate != null)
+                {
+                    return rate;
+                }
+            }
+
+            return byName.getOrDefault(normalizeItemName(itemName), "");
+        }
+    }
+
+    private static final class ItemInfo
+    {
+        private final String name;
+        private final long gePrice;
+        private final long highAlchPrice;
+
+        private ItemInfo(String name, long gePrice, long highAlchPrice)
+        {
+            this.name = name == null || name.isBlank() ? "Unknown item" : name;
+            this.gePrice = gePrice;
+            this.highAlchPrice = highAlchPrice;
+        }
+
+        private String getName()
+        {
+            return name;
+        }
+
+        private long getGePrice()
+        {
+            return gePrice;
+        }
+
+        private long getHighAlchPrice()
+        {
+            return highAlchPrice;
+        }
     }
 }

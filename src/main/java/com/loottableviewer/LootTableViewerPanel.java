@@ -35,10 +35,12 @@ import javax.swing.JScrollBar;
 import javax.swing.JScrollPane;
 import javax.swing.Scrollable;
 import javax.swing.SwingConstants;
+import javax.swing.SwingUtilities;
 import javax.swing.border.EmptyBorder;
 import javax.swing.plaf.basic.BasicScrollBarUI;
 import net.runelite.api.ItemID;
 import net.runelite.http.api.item.ItemPrice;
+import net.runelite.client.config.ConfigManager;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
@@ -55,13 +57,18 @@ public class LootTableViewerPanel extends PluginPanel
     private static final int POTENTIAL_ROW_HEIGHT = 56;
     private static final int POTENTIAL_ICON_SLOT_SIZE = 44;
     private static final int SCROLLBAR_WIDTH = 10;
+    private static final int MAX_ICON_CACHE_SIZE = 512;
     private static final int TITLE_PADDING = 5;
+    private static final String CONFIG_GROUP = "loottableviewer";
+    private static final String UPDATE_NOTICE_KEY = "updateNoticeVersion";
+    private static final String UPDATE_NOTICE_VERSION = "2026-05-30-performance-icons-prefetch";
     private static final String EXPANDED_ARROW = "\u25BE";
     private static final String COLLAPSED_ARROW = "\u25B8";
     private static final String PLUGIN_NAME = "Loot Table Viewer";
     private static final Icon NOTHING_ICON = new NothingIcon();
 
     private final ItemManager itemManager;
+    private final ConfigManager configManager;
 
     private final JLabel sourceLabel = new JLabel(PLUGIN_NAME);
     private final JLabel wikiLinkLabel = new JLabel();
@@ -71,14 +78,26 @@ public class LootTableViewerPanel extends PluginPanel
     private final Map<String, Boolean> expandedCategories = new HashMap<>();
     private final Map<String, Boolean> expandedPotentialTables = new HashMap<>();
     private final Map<String, Integer> itemIdsByName = new HashMap<>();
+    private final Map<String, AsyncBufferedImage> itemImageCache = new LinkedHashMap<String, AsyncBufferedImage>(128, 0.75f, true)
+    {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, AsyncBufferedImage> eldest)
+        {
+            return size() > MAX_ICON_CACHE_SIZE;
+        }
+    };
     private final Map<String, PendingLookupUpdate> pendingLookupUpdates = new HashMap<>();
     private String selectedSourceKey;
+    private boolean renderQueued;
+    private boolean updateNoticeVisible;
 
     @Inject
-    public LootTableViewerPanel(ItemManager itemManager)
+    public LootTableViewerPanel(ItemManager itemManager, ConfigManager configManager)
     {
         super(false);
         this.itemManager = itemManager;
+        this.configManager = configManager;
+        this.updateNoticeVisible = shouldShowUpdateNotice();
 
         setLayout(new BorderLayout());
         setBackground(ColorScheme.DARK_GRAY_COLOR);
@@ -149,7 +168,7 @@ public class LootTableViewerPanel extends PluginPanel
                 historyEntries.remove(i);
                 LootHistoryEntry mergedEntry = existing.withMergedLoot(entry);
                 historyEntries.add(0, applyPendingLookupUpdate(sourceKey, mergedEntry));
-                renderHistory();
+                requestRender();
                 return;
             }
         }
@@ -167,7 +186,7 @@ public class LootTableViewerPanel extends PluginPanel
             }
         }
 
-        renderHistory();
+        requestRender();
     }
 
     public void updateSourceEntry(String sourceKey, String wikiPageTitle, String wikiUrl, List<ReceivedLootRow> receivedLoot, List<DropEntry> lookupResult, String potentialStatus)
@@ -179,7 +198,7 @@ public class LootTableViewerPanel extends PluginPanel
             if (entry.getSourceKey().equals(safeSourceKey))
             {
                 historyEntries.set(i, entry.withLookupUpdate(wikiPageTitle, wikiUrl, receivedLoot, lookupResult, potentialStatus));
-                renderHistory();
+                requestRender();
                 return;
             }
         }
@@ -201,7 +220,7 @@ public class LootTableViewerPanel extends PluginPanel
             if (entry.getHistoryId() == historyId)
             {
                 historyEntries.set(i, entry.withLookupUpdate(wikiPageTitle, wikiUrl, receivedLoot, lookupResult, potentialStatus));
-                renderHistory();
+                requestRender();
                 return;
             }
         }
@@ -245,7 +264,7 @@ public class LootTableViewerPanel extends PluginPanel
             return;
         }
 
-        renderHistory();
+        requestRender();
     }
 
     public void clearHistory()
@@ -275,8 +294,35 @@ public class LootTableViewerPanel extends PluginPanel
         ));
     }
 
+    private void requestRender()
+    {
+        if (!SwingUtilities.isEventDispatchThread())
+        {
+            SwingUtilities.invokeLater(this::requestRender);
+            return;
+        }
+
+        if (renderQueued)
+        {
+            return;
+        }
+
+        renderQueued = true;
+        SwingUtilities.invokeLater(() ->
+        {
+            renderQueued = false;
+            renderHistory();
+        });
+    }
+
     private void renderHistory()
     {
+        if (updateNoticeVisible)
+        {
+            showUpdateNotice();
+            return;
+        }
+
         headerPanel.setVisible(historyEntries.isEmpty());
         sourceLabel.setText(PLUGIN_NAME);
         configureWikiLink(null);
@@ -374,7 +420,7 @@ public class LootTableViewerPanel extends PluginPanel
 
                 selectedSourceKey = entry.getSourceKey();
                 expandedPotentialTables.putIfAbsent(selectedSourceKey, Boolean.TRUE);
-                renderHistory();
+                requestRender();
             }
         };
 
@@ -405,7 +451,7 @@ public class LootTableViewerPanel extends PluginPanel
 
         JLabel iconLabel = buildCenteredLabel();
         iconLabel.setPreferredSize(new Dimension(34, 32));
-        AsyncBufferedImage icon = itemManager.getImage(ItemID.CASKET);
+        AsyncBufferedImage icon = cachedItemImage(ItemID.CASKET, 1, false);
         icon.addTo(iconLabel);
 
         JPanel infoPanel = new JPanel(new GridLayout(2, 1));
@@ -510,12 +556,27 @@ public class LootTableViewerPanel extends PluginPanel
 
         if (row.getItemId() > 0)
         {
-            AsyncBufferedImage itemImage = itemManager.getImage(row.getItemId(), row.getQuantity(), row.getQuantity() > 1);
+            AsyncBufferedImage itemImage = cachedItemImage(row.getItemId(), row.getQuantity(), row.getQuantity() > 1);
             itemImage.addTo(imageLabel);
         }
 
         slot.add(imageLabel, BorderLayout.CENTER);
         return slot;
+    }
+
+    private AsyncBufferedImage cachedItemImage(int itemId, int quantity, boolean stackable)
+    {
+        int safeQuantity = Math.max(1, quantity);
+        String key = itemId + ":" + safeQuantity + ":" + stackable;
+        AsyncBufferedImage cachedImage = itemImageCache.get(key);
+        if (cachedImage != null)
+        {
+            return cachedImage;
+        }
+
+        AsyncBufferedImage image = itemManager.getImage(itemId, safeQuantity, stackable);
+        itemImageCache.put(key, image);
+        return image;
     }
 
     private JPanel buildSlotContainer()
@@ -565,24 +626,14 @@ public class LootTableViewerPanel extends PluginPanel
         if (entries.isEmpty())
         {
             String status = historyEntry.getPotentialStatus();
-            potentialPanel.add(buildMutedRow((status == null || status.isBlank()) ? "No wiki drop-rate data found." : status));
+            if (status != null && !status.isBlank())
+            {
+                potentialPanel.add(buildMutedRow(status));
+            }
         }
         else
         {
-            Map<String, List<DropEntry>> grouped = new LinkedHashMap<>();
-
-            for (DropEntry entry : entries)
-            {
-                String category = entry.getCategory();
-                if (category == null || category.isBlank())
-                {
-                    category = "Other";
-                }
-
-                grouped.computeIfAbsent(category, k -> new ArrayList<>()).add(entry);
-            }
-
-            for (Map.Entry<String, List<DropEntry>> group : grouped.entrySet())
+            for (Map.Entry<String, List<DropEntry>> group : historyEntry.getPotentialLootByCategory().entrySet())
             {
                 String categoryName = group.getKey();
                 List<DropEntry> categoryEntries = group.getValue();
@@ -640,7 +691,7 @@ public class LootTableViewerPanel extends PluginPanel
             {
                 boolean newExpanded = !"▾".equals(arrowLabel.getText());
                 expandedPotentialTables.put(historyEntry.getSourceKey(), newExpanded);
-                renderHistory();
+                requestRender();
             }
         };
 
@@ -763,7 +814,7 @@ public class LootTableViewerPanel extends PluginPanel
         int itemId = resolvePotentialItemId(entry);
         if (itemId > 0)
         {
-            AsyncBufferedImage itemImage = itemManager.getImage(itemId, potentialIconQuantity(entry), false);
+            AsyncBufferedImage itemImage = cachedItemImage(itemId, potentialIconQuantity(entry), false);
             itemImage.addTo(iconLabel);
         }
 
@@ -853,14 +904,19 @@ public class LootTableViewerPanel extends PluginPanel
             return specialItemId;
         }
 
-        String key = normalizeItemName(itemName);
+        String key = ItemIdResolver.normalizeItemName(itemName);
         Integer cachedItemId = itemIdsByName.get(key);
         if (cachedItemId != null)
         {
             return cachedItemId;
         }
 
-        int resolvedItemId = searchItemId(itemName);
+        int resolvedItemId = ItemIdResolver.resolve(itemName);
+        if (resolvedItemId <= 0)
+        {
+            resolvedItemId = searchItemId(itemName);
+        }
+
         itemIdsByName.put(key, resolvedItemId);
         return resolvedItemId;
     }
@@ -875,10 +931,10 @@ public class LootTableViewerPanel extends PluginPanel
                 return 0;
             }
 
-            String normalizedItemName = normalizeItemName(itemName);
+            String normalizedItemName = ItemIdResolver.normalizeItemName(itemName);
             for (ItemPrice match : matches)
             {
-                if (match.getId() > 0 && normalizeItemName(match.getName()).equals(normalizedItemName))
+                if (match.getId() > 0 && ItemIdResolver.normalizeItemName(match.getName()).equals(normalizedItemName))
                 {
                     return match.getId();
                 }
@@ -945,6 +1001,12 @@ public class LootTableViewerPanel extends PluginPanel
 
     private void showEmptyState()
     {
+        if (updateNoticeVisible)
+        {
+            showUpdateNotice();
+            return;
+        }
+
         headerPanel.setVisible(true);
         sourceLabel.setText(PLUGIN_NAME);
         configureWikiLink(null);
@@ -953,6 +1015,87 @@ public class LootTableViewerPanel extends PluginPanel
         contentPanel.add(buildMutedRow("Kill a monster or open a chest to begin."));
         revalidate();
         repaint();
+    }
+
+    private boolean shouldShowUpdateNotice()
+    {
+        try
+        {
+            return !UPDATE_NOTICE_VERSION.equals(configManager.getConfiguration(CONFIG_GROUP, UPDATE_NOTICE_KEY));
+        }
+        catch (RuntimeException ex)
+        {
+            return true;
+        }
+    }
+
+    private void showUpdateNotice()
+    {
+        headerPanel.setVisible(false);
+        configureWikiLink(null);
+        contentPanel.removeAll();
+        contentPanel.add(Box.createVerticalGlue());
+        contentPanel.add(buildUpdateNoticePanel());
+        contentPanel.add(Box.createVerticalGlue());
+        revalidate();
+        repaint();
+    }
+
+    private JPanel buildUpdateNoticePanel()
+    {
+        JPanel noticePanel = new JPanel();
+        noticePanel.setLayout(new BoxLayout(noticePanel, BoxLayout.Y_AXIS));
+        noticePanel.setBackground(ColorScheme.DARKER_GRAY_COLOR);
+        noticePanel.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(ColorScheme.BRAND_ORANGE),
+            new EmptyBorder(12, 12, 12, 12)
+        ));
+        noticePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        noticePanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 240));
+
+        JLabel titleLabel = buildBoldSmallLabel("New update!", ColorScheme.BRAND_ORANGE);
+        titleLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        noticePanel.add(titleLabel);
+        noticePanel.add(Box.createVerticalStrut(8));
+
+        addNoticeLine(noticePanel, "Instant drop-table prefetch after attacking a mob.");
+        addNoticeLine(noticePanel, "Smoother repeated kills.");
+        addNoticeLine(noticePanel, "Improved missing icons.");
+        addNoticeLine(noticePanel, "Cached prices, alch, icons, and rates.");
+        noticePanel.add(Box.createVerticalStrut(8));
+
+        JLabel feedbackLabel = buildBoldSmallLabel("Feedback: Discord Ouf", Color.WHITE);
+        feedbackLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        noticePanel.add(feedbackLabel);
+        noticePanel.add(Box.createVerticalStrut(10));
+
+        JButton closeButton = new JButton("Got it");
+        closeButton.setFocusable(false);
+        closeButton.setFont(FontManager.getRunescapeSmallFont().deriveFont(java.awt.Font.BOLD));
+        closeButton.setForeground(Color.WHITE);
+        closeButton.setBackground(ColorScheme.DARK_GRAY_COLOR);
+        closeButton.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(ColorScheme.BRAND_ORANGE),
+            new EmptyBorder(4, 10, 4, 10)
+        ));
+        closeButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+        closeButton.setAlignmentX(Component.LEFT_ALIGNMENT);
+        closeButton.addActionListener(event ->
+        {
+            updateNoticeVisible = false;
+            configManager.setConfiguration(CONFIG_GROUP, UPDATE_NOTICE_KEY, UPDATE_NOTICE_VERSION);
+            renderHistory();
+        });
+        noticePanel.add(closeButton);
+        return noticePanel;
+    }
+
+    private void addNoticeLine(JPanel noticePanel, String text)
+    {
+        JLabel label = buildSmallLabel("- " + text, ColorScheme.LIGHT_GRAY_COLOR);
+        label.setAlignmentX(Component.LEFT_ALIGNMENT);
+        noticePanel.add(label);
+        noticePanel.add(Box.createVerticalStrut(4));
     }
 
     private JPanel buildVerticalPanel()
@@ -1238,6 +1381,7 @@ public class LootTableViewerPanel extends PluginPanel
         private final String wikiUrl;
         private final List<ReceivedLootRow> receivedLoot;
         private final List<DropEntry> potentialLoot;
+        private final Map<String, List<DropEntry>> potentialLootByCategory;
         private final String potentialStatus;
         private final boolean showReceivedItems;
         private final long count;
@@ -1316,6 +1460,7 @@ public class LootTableViewerPanel extends PluginPanel
             this.wikiUrl = wikiUrl == null ? "" : wikiUrl;
             this.receivedLoot = receivedLoot == null ? Collections.emptyList() : Collections.unmodifiableList(new ArrayList<>(receivedLoot));
             this.potentialLoot = potentialLoot == null ? Collections.emptyList() : Collections.unmodifiableList(new ArrayList<>(potentialLoot));
+            this.potentialLootByCategory = groupPotentialLootByCategory(this.potentialLoot);
             this.potentialStatus = potentialStatus == null ? "" : potentialStatus;
             this.showReceivedItems = showReceivedItems;
             this.count = Math.max(count, 1);
@@ -1398,6 +1543,34 @@ public class LootTableViewerPanel extends PluginPanel
             return updatedRows;
         }
 
+        private static Map<String, List<DropEntry>> groupPotentialLootByCategory(List<DropEntry> potentialLoot)
+        {
+            if (potentialLoot == null || potentialLoot.isEmpty())
+            {
+                return Collections.emptyMap();
+            }
+
+            Map<String, List<DropEntry>> grouped = new LinkedHashMap<>();
+            for (DropEntry entry : potentialLoot)
+            {
+                String category = entry.getCategory();
+                if (category == null || category.isBlank())
+                {
+                    category = "Other";
+                }
+
+                grouped.computeIfAbsent(category, key -> new ArrayList<>()).add(entry);
+            }
+
+            Map<String, List<DropEntry>> immutableGrouped = new LinkedHashMap<>();
+            for (Map.Entry<String, List<DropEntry>> group : grouped.entrySet())
+            {
+                immutableGrouped.put(group.getKey(), Collections.unmodifiableList(group.getValue()));
+            }
+
+            return Collections.unmodifiableMap(immutableGrouped);
+        }
+
         private static String normalizeSourceKey(String sourceName)
         {
             return sourceName == null ? "" : sourceName.toLowerCase().replace('\u00A0', ' ').trim();
@@ -1441,6 +1614,11 @@ public class LootTableViewerPanel extends PluginPanel
         public List<DropEntry> getPotentialLoot()
         {
             return potentialLoot;
+        }
+
+        public Map<String, List<DropEntry>> getPotentialLootByCategory()
+        {
+            return potentialLootByCategory;
         }
 
         public String getPotentialStatus()
