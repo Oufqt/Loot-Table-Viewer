@@ -904,19 +904,14 @@ public class LootTableViewerPanel extends PluginPanel
             return specialItemId;
         }
 
-        String key = ItemIdResolver.normalizeItemName(itemName);
+        String key = normalizeItemName(itemName);
         Integer cachedItemId = itemIdsByName.get(key);
         if (cachedItemId != null)
         {
             return cachedItemId;
         }
 
-        int resolvedItemId = ItemIdResolver.resolve(itemName);
-        if (resolvedItemId <= 0)
-        {
-            resolvedItemId = searchItemId(itemName);
-        }
-
+        int resolvedItemId = searchItemId(itemName);
         itemIdsByName.put(key, resolvedItemId);
         return resolvedItemId;
     }
@@ -931,10 +926,10 @@ public class LootTableViewerPanel extends PluginPanel
                 return 0;
             }
 
-            String normalizedItemName = ItemIdResolver.normalizeItemName(itemName);
+            String normalizedItemName = normalizeItemName(itemName);
             for (ItemPrice match : matches)
             {
-                if (match.getId() > 0 && ItemIdResolver.normalizeItemName(match.getName()).equals(normalizedItemName))
+                if (match.getId() > 0 && normalizeItemName(match.getName()).equals(normalizedItemName))
                 {
                     return match.getId();
                 }
@@ -996,7 +991,20 @@ public class LootTableViewerPanel extends PluginPanel
 
     private String normalizeItemName(String itemName)
     {
-        return itemName == null ? "" : itemName.toLowerCase().replace('\u00A0', ' ').trim();
+        if (itemName == null)
+        {
+            return "";
+        }
+
+        return itemName
+            .toLowerCase()
+            .replace('\u00A0', ' ')
+            .replace('\u2019', '\'')
+            .replace("'", "")
+            .replaceAll("(?i)\\s*\\((?:m|noted)\\)\\s*", " ")
+            .replaceAll("[^a-z0-9]+", " ")
+            .replaceAll("\\s+", " ")
+            .trim();
     }
 
     private void showEmptyState()
