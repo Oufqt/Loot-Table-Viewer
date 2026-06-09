@@ -1,6 +1,8 @@
 package com.loottableviewer;
 
 import com.loottableviewer.model.DropEntry;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -15,20 +17,16 @@ public class WikiDropParser
     private static final Pattern DROPS_TABLE_HEAD_PATTERN = Pattern.compile("\\{\\{\\s*DropsTableHead\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern DROP_LINE_CLUE_PATTERN = Pattern.compile("\\{\\{\\s*DropsLineClue\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern DROP_LINE_PATTERN = Pattern.compile("\\{\\{\\s*(?:DropsLine|DropLine)\\b", Pattern.CASE_INSENSITIVE);
-    private static final Pattern NAME_PATTERN = Pattern.compile("\\|\\s*(?:name|item|drop|reward)\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern ITEM_PATTERN = Pattern.compile("\\|\\s*(?:id|itemid)\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern TYPE_PATTERN = Pattern.compile("\\|\\s*type\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern QUANTITY_PATTERN = Pattern.compile("\\|\\s*(?:quantity|qty|amount)\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern QUANTITY_LOW_PATTERN = Pattern.compile("\\|\\s*(?:quantitylow|quantitymin|minquantity)\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern QUANTITY_HIGH_PATTERN = Pattern.compile("\\|\\s*(?:quantityhigh|quantitymax|maxquantity)\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern RARITY_PATTERN = Pattern.compile("\\|\\s*(?:rarity|chance)\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern NOTES_PATTERN = Pattern.compile("\\|\\s*(?:raritynotes|notes|text)\\s*=\\s*([^|\\n]+)", Pattern.CASE_INSENSITIVE);
     private static final Pattern ONE_OVER_PATTERN = Pattern.compile("\\b1\\s*/\\s*[0-9,]+(?:\\.[0-9]+)?\\b");
     private static final Pattern FRACTION_PATTERN = Pattern.compile("\\b[0-9,]+\\s*/\\s*[0-9,]+(?:\\.[0-9]+)?\\b");
     private static final Pattern DICE_PATTERN = Pattern.compile("\\b1\\s+in\\s+[0-9,]+\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern PERCENT_PATTERN = Pattern.compile("\\b[0-9]+(?:\\.[0-9]+)?%\\b");
     private static final Pattern ALWAYS_PATTERN = Pattern.compile("\\b(always|guaranteed|common|uncommon|rare|very rare)\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern WIKI_HEADING_PATTERN = Pattern.compile("(?m)^\\s*(={2,6})\\s*(.*?)\\s*\\1\\s*$");
+    private static final Pattern WIKI_EXPR_RATE_PATTERN = Pattern.compile("1\\s*/\\s*\\{\\{\\s*#expr\\s*:\\s*1\\s*/\\s*\\((.*?)\\)\\s*round\\s*1\\s*\\}\\}", Pattern.CASE_INSENSITIVE);
+    private static final Pattern WIKI_EXPR_TEMPLATE_PATTERN = Pattern.compile("\\{\\{\\s*#expr\\b.*?\\}\\}", Pattern.CASE_INSENSITIVE);
+    private static final Pattern RARITY_TEMPLATE_DENOMINATOR_PATTERN = Pattern.compile("\\{\\{\\s*[^{}|]*rarity\\s*\\|\\s*([0-9,]+(?:\\.[0-9]+)?)\\s*(?:\\|[^{}]*)?\\}\\}", Pattern.CASE_INSENSITIVE);
+    private static final Pattern EXACT_FRACTION_PATTERN = Pattern.compile("([0-9,]+)\\s*/\\s*([0-9,]+(?:\\.[0-9]+)?)");
 
     private final LootTableViewerConfig config;
 
@@ -149,16 +147,18 @@ public class WikiDropParser
 
     private void addEntryFromBlock(String block, String currentCategory, List<DropEntry> entries)
     {
-        String name = clean(extract(NAME_PATTERN, block));
-        String itemIdRaw = clean(extract(ITEM_PATTERN, block));
-        String type = clean(extract(TYPE_PATTERN, block));
+        String name = clean(extractParam(block, "name", "item", "drop", "reward"));
+        String itemIdRaw = clean(extractParam(block, "id", "itemid"));
+        String type = clean(extractParam(block, "type"));
         String quantity = normalizeQuantity(
-            extract(QUANTITY_PATTERN, block),
-            extract(QUANTITY_LOW_PATTERN, block),
-            extract(QUANTITY_HIGH_PATTERN, block)
+            extractParam(block, "quantity", "qty", "amount"),
+            extractParam(block, "quantitylow", "quantitymin", "minquantity"),
+            extractParam(block, "quantityhigh", "quantitymax", "maxquantity")
         );
-        String rarityRaw = clean(extract(RARITY_PATTERN, block));
-        String notes = clean(extract(NOTES_PATTERN, block));
+        String rawRarity = extractParam(block, "rarity", "chance");
+        String rawNotes = extractParam(block, "raritynotes", "notes", "text");
+        String rarityRaw = clean(rawRarity);
+        String notes = clean(rawNotes);
 
         if (name.isEmpty() && DROP_LINE_CLUE_PATTERN.matcher(block).find())
         {
@@ -170,10 +170,10 @@ public class WikiDropParser
             return;
         }
 
-        String dropRate = extractRate(rarityRaw, notes);
+        String dropRate = extractRate(rawRarity, rawNotes);
         String rarityLabel = buildRarityLabel(rarityRaw, dropRate);
 
-        if (!config.includeAlwaysDrops() && isAlwaysDrop(rarityRaw, notes))
+        if (!config.includeAlwaysDrops() && isAlwaysDrop(rawRarity, rawNotes))
         {
             return;
         }
@@ -191,6 +191,113 @@ public class WikiDropParser
         }
 
         return "Clue scroll (" + cleanType + ")";
+    }
+
+    private static String extractParam(String block, String... keys)
+    {
+        if (block == null || block.isBlank())
+        {
+            return "";
+        }
+
+        for (String rawPart : splitTopLevelParameters(templateBody(block)))
+        {
+            int equalsIndex = rawPart.indexOf('=');
+            if (equalsIndex < 0)
+            {
+                continue;
+            }
+
+            String key = rawPart.substring(0, equalsIndex).trim().toLowerCase(Locale.ENGLISH);
+            for (String expectedKey : keys)
+            {
+                if (key.equals(expectedKey))
+                {
+                    return rawPart.substring(equalsIndex + 1).trim();
+                }
+            }
+        }
+
+        return "";
+    }
+
+    private static String templateBody(String block)
+    {
+        String body = block == null ? "" : block.trim();
+        if (body.startsWith("{{"))
+        {
+            body = body.substring(2);
+        }
+
+        if (body.endsWith("}}"))
+        {
+            body = body.substring(0, body.length() - 2);
+        }
+
+        return body;
+    }
+
+    private static List<String> splitTopLevelParameters(String value)
+    {
+        List<String> parts = new ArrayList<>();
+        if (value == null || value.isEmpty())
+        {
+            return parts;
+        }
+
+        StringBuilder part = new StringBuilder();
+        int templateDepth = 0;
+        int linkDepth = 0;
+
+        for (int i = 0; i < value.length(); i++)
+        {
+            char current = value.charAt(i);
+            char next = i + 1 < value.length() ? value.charAt(i + 1) : '\0';
+
+            if (current == '{' && next == '{')
+            {
+                templateDepth++;
+                part.append(current).append(next);
+                i++;
+                continue;
+            }
+
+            if (current == '}' && next == '}' && templateDepth > 0)
+            {
+                templateDepth--;
+                part.append(current).append(next);
+                i++;
+                continue;
+            }
+
+            if (current == '[' && next == '[')
+            {
+                linkDepth++;
+                part.append(current).append(next);
+                i++;
+                continue;
+            }
+
+            if (current == ']' && next == ']' && linkDepth > 0)
+            {
+                linkDepth--;
+                part.append(current).append(next);
+                i++;
+                continue;
+            }
+
+            if (current == '|' && templateDepth == 0 && linkDepth == 0)
+            {
+                parts.add(part.toString());
+                part.setLength(0);
+                continue;
+            }
+
+            part.append(current);
+        }
+
+        parts.add(part.toString());
+        return parts;
     }
 
     private static String lastWikiHeading(String text, int fromIndex, int toIndex)
@@ -270,10 +377,22 @@ public class WikiDropParser
 
     private static String extractRate(String rarity, String notes)
     {
+        String expressionRate = findExpressionRate(rarity);
+        if (expressionRate != null)
+        {
+            return expressionRate;
+        }
+
         String fromRarity = findRate(rarity);
         if (fromRarity != null)
         {
             return normalizeRate(fromRarity);
+        }
+
+        expressionRate = findExpressionRate(notes);
+        if (expressionRate != null)
+        {
+            return expressionRate;
         }
 
         String fromNotes = findRate(notes);
@@ -282,7 +401,7 @@ public class WikiDropParser
             return normalizeRate(fromNotes);
         }
 
-        return rarity == null ? "" : rarity;
+        return clean(rarity);
     }
 
     private static String findRate(String value)
@@ -292,25 +411,33 @@ public class WikiDropParser
             return null;
         }
 
-        Matcher oneOverMatcher = ONE_OVER_PATTERN.matcher(value);
+        String templateRate = findRarityTemplateRate(value);
+        if (templateRate != null)
+        {
+            return templateRate;
+        }
+
+        String searchable = WIKI_EXPR_TEMPLATE_PATTERN.matcher(value).replaceAll(" ");
+
+        Matcher oneOverMatcher = ONE_OVER_PATTERN.matcher(searchable);
         if (oneOverMatcher.find())
         {
             return oneOverMatcher.group();
         }
 
-        Matcher fractionMatcher = FRACTION_PATTERN.matcher(value);
+        Matcher fractionMatcher = FRACTION_PATTERN.matcher(searchable);
         if (fractionMatcher.find())
         {
             return fractionMatcher.group();
         }
 
-        Matcher diceMatcher = DICE_PATTERN.matcher(value);
+        Matcher diceMatcher = DICE_PATTERN.matcher(searchable);
         if (diceMatcher.find())
         {
             return diceMatcher.group();
         }
 
-        Matcher percentMatcher = PERCENT_PATTERN.matcher(value);
+        Matcher percentMatcher = PERCENT_PATTERN.matcher(searchable);
         if (percentMatcher.find())
         {
             return percentMatcher.group();
@@ -319,9 +446,92 @@ public class WikiDropParser
         return null;
     }
 
+    private static String findRarityTemplateRate(String value)
+    {
+        Matcher matcher = RARITY_TEMPLATE_DENOMINATOR_PATTERN.matcher(value);
+        if (!matcher.find())
+        {
+            return null;
+        }
+
+        return "1/" + matcher.group(1).replace(",", "");
+    }
+
     private static String normalizeRate(String value)
     {
-        return value == null ? "" : value.replaceAll("\\s+", "");
+        if (value == null)
+        {
+            return "";
+        }
+
+        Matcher fractionMatcher = EXACT_FRACTION_PATTERN.matcher(value.replaceAll("\\s+", ""));
+        if (!fractionMatcher.matches())
+        {
+            return value.replaceAll("\\s+", "");
+        }
+
+        try
+        {
+            long numerator = Long.parseLong(fractionMatcher.group(1).replace(",", ""));
+            BigDecimal denominator = new BigDecimal(fractionMatcher.group(2).replace(",", ""));
+            if (numerator <= 1 || denominator.compareTo(BigDecimal.valueOf(numerator)) <= 0)
+            {
+                return value.replaceAll("\\s+", "");
+            }
+
+            BigDecimal simplifiedDenominator = denominator.divide(BigDecimal.valueOf(numerator), 2, RoundingMode.HALF_UP).stripTrailingZeros();
+            return "1/" + simplifiedDenominator.toPlainString();
+        }
+        catch (NumberFormatException | ArithmeticException ex)
+        {
+            return value.replaceAll("\\s+", "");
+        }
+    }
+
+    private static String findExpressionRate(String value)
+    {
+        if (value == null || value.isEmpty())
+        {
+            return null;
+        }
+
+        Matcher matcher = WIKI_EXPR_RATE_PATTERN.matcher(value);
+        if (!matcher.find())
+        {
+            return null;
+        }
+
+        long denominator = roundedExpressionDenominator(matcher.group(1));
+        return denominator <= 0 ? null : "1/" + denominator;
+    }
+
+    private static long roundedExpressionDenominator(String expression)
+    {
+        if (expression == null || expression.isBlank())
+        {
+            return 0;
+        }
+
+        double probability = 1.0;
+        for (String rawFactor : expression.split("\\*"))
+        {
+            Matcher matcher = EXACT_FRACTION_PATTERN.matcher(rawFactor.trim());
+            if (!matcher.matches())
+            {
+                return 0;
+            }
+
+            double numerator = Double.parseDouble(matcher.group(1).replace(",", ""));
+            double denominator = Double.parseDouble(matcher.group(2).replace(",", ""));
+            if (numerator <= 0 || denominator <= 0)
+            {
+                return 0;
+            }
+
+            probability *= numerator / denominator;
+        }
+
+        return probability <= 0 ? 0 : Math.round(1.0 / probability);
     }
 
     private static String buildRarityLabel(String rarity, String dropRate)
@@ -352,7 +562,7 @@ public class WikiDropParser
         String namedCategory = "";
         String dropVersion = "";
 
-        for (String rawPart : value.split("\\|"))
+        for (String rawPart : splitTopLevelParameters(value))
         {
             String part = clean(rawPart);
             if (part.isBlank())
@@ -467,12 +677,6 @@ public class WikiDropParser
         }
 
         return "Drop table " + cleanVersion;
-    }
-
-    private static String extract(Pattern pattern, String text)
-    {
-        Matcher matcher = pattern.matcher(text);
-        return matcher.find() ? matcher.group(1).trim() : "";
     }
 
     private static String clean(String value)

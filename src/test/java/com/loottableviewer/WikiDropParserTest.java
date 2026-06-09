@@ -116,6 +116,78 @@ public class WikiDropParserTest
     }
 
     @Test
+    public void parseIncludesLateTertiaryDropsWithDefaultConfig()
+    {
+        WikiDropParser parser = new WikiDropParser(new LootTableViewerConfig()
+        {
+        });
+        StringBuilder wiki = new StringBuilder(
+            "==Drops==\n"
+                + "===Main table===\n"
+                + "{{DropsTableHead}}\n"
+        );
+        for (int i = 0; i < 35; i++)
+        {
+            wiki.append("{{DropsLine|name=Filler ")
+                .append(i)
+                .append("|quantity=1|rarity=1/100}}\n");
+        }
+        wiki.append("{{DropsTableBottom}}\n")
+            .append("===Tertiary===\n")
+            .append("{{DropsTableHead}}\n")
+            .append("{{DropsLine|name=Giant egg sac(full)|quantity=1|rarity=1/20}}\n")
+            .append("{{DropsLine|name=Pristine spider silk|quantity=1|rarity=1/50|gemw=no}}\n")
+            .append("{{DropsLine|name=Jar of eyes|quantity=1|rarity=1/2000}}\n")
+            .append("{{DropsLine|name=Sraracha|quantity=1|rarity=1/3000|gemw=No}}\n")
+            .append("{{DropsTableBottom}}");
+
+        List<DropEntry> drops = parser.parse(wiki.toString());
+
+        assertEquals(39, drops.size());
+        DropEntry silk = requireDrop(drops, "Pristine spider silk");
+        assertEquals("Tertiary", silk.getCategory());
+        assertEquals("1", silk.getQuantityText());
+        assertEquals("1/50", silk.getDropRateText());
+        assertEquals("1/20", requireDrop(drops, "Giant egg sac(full)").getDropRateText());
+        assertEquals("1/2000", requireDrop(drops, "Jar of eyes").getDropRateText());
+        assertEquals("1/3000", requireDrop(drops, "Sraracha").getDropRateText());
+    }
+
+    @Test
+    public void parseSimplifiesUnsimplifiedWikiFractions()
+    {
+        WikiDropParser parser = new WikiDropParser(new LootTableViewerConfig()
+        {
+        });
+
+        List<DropEntry> drops = parser.parse(
+            "{{DropsTableHead|Weapons and armour}}\n"
+                + "{{DropsLine|name=Dragon med helm|quantity=1|rarity=5/104}}\n"
+                + "{{DropsLine|name=Grimy kwuarm|quantity=10-15 (noted)|rarity=15/800}}"
+        );
+
+        assertEquals("1/20.8", requireDrop(drops, "Dragon med helm").getDropRateText());
+        assertEquals("1/53.33", requireDrop(drops, "Grimy kwuarm").getDropRateText());
+    }
+
+    @Test
+    public void parseKeepsNestedRarityValuesTogether()
+    {
+        WikiDropParser parser = new WikiDropParser(new LootTableViewerConfig()
+        {
+        });
+
+        List<DropEntry> drops = parser.parse(
+            "{{DropsTableHead|Tertiary}}\n"
+                + "{{DropsLine|name=Brimstone key|quantity=1|rarity={{Brimstone rarity|318}}|raritynotes=<ref group=d>Only on task.</ref>|gemw=No}}\n"
+                + "{{DropsLineReward|name=Occult ornament kit|quantity=1|rarity=1/{{#expr:1/( 1/23 * 1/37 ) round 1}}}}"
+        );
+
+        assertEquals("1/318", requireDrop(drops, "Brimstone key").getDropRateText());
+        assertEquals("1/851", requireDrop(drops, "Occult ornament kit").getDropRateText());
+    }
+
+    @Test
     public void parseUsesTableHeadCategoriesWhenDropSectionHeadingIsGeneric()
     {
         WikiDropParser parser = new WikiDropParser(new LootTableViewerConfig()
@@ -159,5 +231,18 @@ public class WikiDropParserTest
         assertEquals(2, drops.size());
         assertEquals("Ahrim's", drops.get(0).getCategory());
         assertEquals("Master clue uniques", drops.get(1).getCategory());
+    }
+
+    private static DropEntry requireDrop(List<DropEntry> drops, String itemName)
+    {
+        for (DropEntry drop : drops)
+        {
+            if (itemName.equals(drop.getItemName()))
+            {
+                return drop;
+            }
+        }
+
+        throw new AssertionError("Missing drop: " + itemName);
     }
 }

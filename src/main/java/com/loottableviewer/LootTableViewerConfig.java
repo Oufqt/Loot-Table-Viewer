@@ -14,7 +14,7 @@ public interface LootTableViewerConfig extends Config
     )
     default int maxDropRows()
     {
-        return 30;
+        return 500;
     }
 
     @ConfigItem(
