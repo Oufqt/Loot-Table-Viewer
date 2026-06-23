@@ -26,6 +26,18 @@ public class SourceNameNormalizer
         aliases.put("reward casket (hard)", "Reward casket (hard)");
         aliases.put("reward casket (elite)", "Reward casket (elite)");
         aliases.put("reward casket (master)", "Reward casket (master)");
+        aliases.put("sergeant strongstack", "General Graardor");
+        aliases.put("sergeant steelwill", "General Graardor");
+        aliases.put("sergeant grimspike", "General Graardor");
+        aliases.put("flight kilisa", "Kree'arra");
+        aliases.put("flockleader geerin", "Kree'arra");
+        aliases.put("wingman skree", "Kree'arra");
+        aliases.put("starlight", "Commander Zilyana");
+        aliases.put("growler", "Commander Zilyana");
+        aliases.put("bree", "Commander Zilyana");
+        aliases.put("tstanon karlak", "K'ril Tsutsaroth");
+        aliases.put("zakl'n gritch", "K'ril Tsutsaroth");
+        aliases.put("balfrug kreeyath", "K'ril Tsutsaroth");
     }
 
     public String normalize(String sourceName)
