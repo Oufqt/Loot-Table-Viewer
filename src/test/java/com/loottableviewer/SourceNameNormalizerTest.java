@@ -33,6 +33,7 @@ public class SourceNameNormalizerTest
         assertEquals("Chambers of Xeric", normalizer.normalize("cox"));
         assertEquals("Theatre of Blood", normalizer.normalize("tob"));
         assertEquals("Tombs of Amascut", normalizer.normalize("toa"));
-        assertEquals("Chest", normalizer.normalize("barrows chest"));
+        assertEquals("Chest (Barrows)", normalizer.normalize("barrows chest"));
+        assertEquals("Chest (Barrows)", normalizer.normalize("barrows"));
     }
 }

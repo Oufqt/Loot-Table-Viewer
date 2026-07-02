@@ -19,8 +19,8 @@ public class SourceNameNormalizer
         aliases.put("theatre of blood", "Theatre of Blood");
         aliases.put("toa", "Tombs of Amascut");
         aliases.put("tombs of amascut", "Tombs of Amascut");
-        aliases.put("barrows chest", "Chest");
-        aliases.put("barrows", "Chest");
+        aliases.put("barrows chest", "Chest (Barrows)");
+        aliases.put("barrows", "Chest (Barrows)");
         aliases.put("reward casket (easy)", "Reward casket (easy)");
         aliases.put("reward casket (medium)", "Reward casket (medium)");
         aliases.put("reward casket (hard)", "Reward casket (hard)");
